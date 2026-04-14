@@ -312,37 +312,37 @@ def send_bill_via_whatsapp(to_number, bill_path, customer_name,
                             business_name, updated_due, items,
                             current_total, payment, previous_due,
                             record_date) -> bool:
+    """Send bill via Evolution API — image if possible, text fallback."""
     try:
-        from config import Config
-        from twilio.rest import Client
-        client = Client(Config.TWILIO_ACCOUNT_SID, Config.TWILIO_AUTH_TOKEN)
+        from services.evolution_service import send_text_message, send_image_message
 
-        if not to_number.startswith("whatsapp:"):
-            to_number = f"whatsapp:{to_number}"
-
-        image_url = upload_to_imgbb(bill_path)
         text = _build_text_bill(business_name, customer_name, items,
-                                 current_total, payment, previous_due,
-                                 updated_due, record_date)
+                                current_total, payment, previous_due,
+                                updated_due, record_date)
 
+        # Try image first
+        image_url = upload_to_imgbb(bill_path)
         if image_url:
-            msg = client.messages.create(
-                from_=Config.TWILIO_WHATSAPP_FROM,
-                to=to_number,
-                body=f"🧾 Bill - {business_name}\nDue: Rs.{updated_due:.0f}",
-                media_url=[image_url],
+            result = send_image_message(
+                to_number=to_number,
+                image_url=image_url,
+                caption=f"🧾 {business_name} | Due: Rs.{updated_due:.0f}",
             )
-            logger.info(f"Bill IMAGE sent to {to_number}: {msg.sid}")
-        else:
-            msg = client.messages.create(
-                from_=Config.TWILIO_WHATSAPP_FROM,
-                to=to_number,
-                body=text,
-            )
-            logger.info(f"Bill TEXT sent to {to_number}: {msg.sid}")
-        return True
+            if result["success"]:
+                logger.info(f"Bill IMAGE sent to {to_number}")
+                return True
+
+        # Fallback: text bill
+        result = send_text_message(to_number, text)
+        if result["success"]:
+            logger.info(f"Bill TEXT sent to {to_number}")
+            return True
+
+        logger.error(f"Bill send failed: {result.get('error')}")
+        return False
+
     except Exception as e:
-        logger.error(f"Bill send failed: {e}")
+        logger.error(f"Bill send exception: {e}")
         return False
 
 
