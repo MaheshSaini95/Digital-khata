@@ -122,7 +122,8 @@ def handle_message(from_number: str, body: str, media_url: Optional[str] = None)
     if state == "add_ask_phone":
         return _add_ask_phone(client_id, from_number, body)
 
-   
+    if state == "add_confirm":
+        return _add_confirm(client_id, from_number, lower)
 
     # ── PAYMENT flow ───────────────────────────────────────
     if state == "pay_ask_name":
@@ -131,7 +132,8 @@ def handle_message(from_number: str, body: str, media_url: Optional[str] = None)
     if state == "pay_ask_amount":
         return _pay_ask_amount(client_id, from_number, body)
 
- 
+    if state == "pay_confirm":
+        return _pay_confirm(client_id, from_number, lower)
 
     # ── UPDATE flow ────────────────────────────────────────
     if state == "upd_ask_name":
