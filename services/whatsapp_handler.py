@@ -158,12 +158,83 @@ def handle_message(from_number: str, body: str, media_url: Optional[str] = None)
 # UNREGISTERED
 # ─────────────────────────────────────────────────────────
 
-def _handle_unregistered(from_number: str) -> str:
+def handle_unregistered(from_number: str) -> str:
+    """Start registration flow for new shop owners."""
+    session = sess.get_session(from_number)
+    state = session.get("state", "idle")
+
+    # Registration FSM
+    if state == "reg_ask_name":
+        return reg_ask_name(from_number, session.get("body", ""))
+    elif state == "reg_ask_business":
+        return reg_ask_business(from_number, session.get("body", ""))
+    elif state == "reg_confirm":
+        return reg_confirm(from_number, session.get("body", ""))
+
+    # Fresh visitor — start registration
+    sess.set_session(from_number, state="reg_ask_name")
     return (
-        "👋 Welcome to *Digital Khata*!\n\n"
-        "Your number is not registered as a shop account.\n"
-        "Please contact support to get started."
+        "👋 *Welcome to Digital Khata!*\n\n"
+        "Apni dukaan ka hisaab kitaab WhatsApp pe rakhein — bilkul free!\n\n"
+        "Registration shuru karte hain 👇\n"
+        "Apna *pura naam* likhein:"
     )
+
+
+def reg_ask_name(from_number: str, body: str) -> str:
+    name = body.strip().title()
+    if not name or len(name) < 2:
+        return "Please enter a valid name (at least 2 characters):"
+    sess.set_session(from_number, state="reg_ask_business", owner_name=name)
+    return (
+        f"Great, *{name}*! 👍\n\n"
+        "Apni *dukaan/business ka naam* likhein:"
+    )
+
+
+def reg_ask_business(from_number: str, body: str) -> str:
+    business = body.strip()
+    if not business or len(business) < 2:
+        return "Please enter a valid business name:"
+    session = sess.get_session(from_number)
+    owner_name = session.get("owner_name", "")
+    sess.set_session(from_number, state="reg_confirm",
+                     owner_name=owner_name, business_name=business)
+    return (
+        f"✅ *Confirm Registration*\n\n"
+        f"👤 Owner: *{owner_name}*\n"
+        f"🏪 Business: *{business}*\n"
+        f"📱 WhatsApp: *{from_number}*\n\n"
+        f"Reply *yes* to register, *no* to cancel."
+    )
+
+
+def reg_confirm(from_number: str, body: str) -> str:
+    lower = body.strip().lower()
+    if lower in ("yes", "y", "haan", "ha", "ok", "1"):
+        session = sess.get_session(from_number)
+        owner_name = session.get("owner_name", "Shop Owner")
+        business_name = session.get("business_name", "My Store")
+        try:
+            db.upsert_client(
+                name=owner_name,
+                whatsapp_number=from_number,
+                business_name=business_name
+            )
+            sess.clear_session(from_number)
+            return (
+                f"🎉 *Registration Successful!*\n\n"
+                f"Welcome, *{owner_name}*!\n"
+                f"Aapki dukaan *{business_name}* ab Digital Khata pe registered hai.\n\n"
+                f"Reply *menu* to get started! 📒"
+            )
+        except Exception as e:
+            logger.error(f"Registration failed: {e}")
+            return "Registration failed. Please try again later."
+    elif lower in ("no", "n", "nahi", "cancel", "2"):
+        sess.clear_session(from_number)
+        return "Registration cancelled. Send any message to start again."
+    return "Please reply *yes* to confirm or *no* to cancel."
 
 
 # ─────────────────────────────────────────────────────────
