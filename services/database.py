@@ -1,5 +1,6 @@
 """
-services/database.py - Supabase client wrapper with all DB operations
+services/database.py - Supabase client wrapper
+Fixed for supabase>=2.28.3 — .single() removed (causes 406 errors)
 """
 from __future__ import annotations
 import logging
@@ -14,34 +15,47 @@ _client: Optional[Client] = None
 
 
 def get_db() -> Client:
-    """Lazily initialize and return the Supabase client (service role)."""
     global _client
     if _client is None:
         _client = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
     return _client
 
 
-# ─────────────────────────────────────────────
-# CLIENT / TENANT
-# ─────────────────────────────────────────────
-
 def get_client_by_number(whatsapp_number: str) -> Optional[dict]:
-    """Look up the SaaS client by their WhatsApp number."""
+    """
+    Look up client by primary OR alternative WhatsApp number.
+    Supports multiple numbers per shop account.
+    """
     db = get_db()
-    # Normalize: strip whatsapp: prefix if present
     number = whatsapp_number.replace("whatsapp:", "")
     try:
+        # Check primary number
         res = db.table("clients").select("*") \
             .eq("whatsapp_number", number) \
             .eq("is_active", True) \
-            .single().execute()
-        return res.data
-    except Exception:
+            .limit(1).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]
+
+        # Check alt_numbers array (secondary numbers)
+        try:
+            res2 = db.table("clients").select("*") \
+                .eq("is_active", True) \
+                .contains("alt_numbers", [number]) \
+                .limit(1).execute()
+            if res2.data and len(res2.data) > 0:
+                logger.info(f"Client found via alt number: {number}")
+                return res2.data[0]
+        except Exception:
+            pass  # alt_numbers column may not exist yet
+
+        return None
+    except Exception as e:
+        logger.error(f"get_client_by_number error: {e}")
         return None
 
 
 def upsert_client(name: str, whatsapp_number: str, business_name: str = "") -> dict:
-    """Create or update a client record."""
     db = get_db()
     number = whatsapp_number.replace("whatsapp:", "")
     res = db.table("clients").upsert({
@@ -53,23 +67,18 @@ def upsert_client(name: str, whatsapp_number: str, business_name: str = "") -> d
     return res.data[0]
 
 
-# ─────────────────────────────────────────────
-# CUSTOMERS
-# ─────────────────────────────────────────────
-
 def get_or_create_customer(client_id: str, customer_name: str) -> dict:
-    """Fetch or create a customer for the given client."""
     db = get_db()
     name_lower = customer_name.strip().title()
     try:
         res = db.table("customers").select("*") \
             .eq("client_id", client_id) \
             .ilike("name", name_lower) \
-            .single().execute()
-        return res.data
+            .limit(1).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]
     except Exception:
         pass
-    # Create new
     res = db.table("customers").insert({
         "client_id": client_id,
         "name": name_lower,
@@ -79,7 +88,6 @@ def get_or_create_customer(client_id: str, customer_name: str) -> dict:
 
 
 def search_customers(client_id: str, query: str) -> list[dict]:
-    """Auto-suggest customers by partial name match."""
     db = get_db()
     res = db.table("customers").select("id, name, total_due") \
         .eq("client_id", client_id) \
@@ -89,7 +97,6 @@ def search_customers(client_id: str, query: str) -> list[dict]:
 
 
 def get_all_customers(client_id: str) -> list[dict]:
-    """All customers for dashboard."""
     db = get_db()
     res = db.table("customers").select("*") \
         .eq("client_id", client_id) \
@@ -97,12 +104,7 @@ def get_all_customers(client_id: str) -> list[dict]:
     return res.data or []
 
 
-# ─────────────────────────────────────────────
-# RECORDS
-# ─────────────────────────────────────────────
-
 def get_previous_due(client_id: str, customer_name: str) -> float:
-    """Get the most recent updated_due for a customer."""
     db = get_db()
     name = customer_name.strip().title()
     try:
@@ -111,23 +113,21 @@ def get_previous_due(client_id: str, customer_name: str) -> float:
             .ilike("customer_name", name) \
             .order("date", desc=True) \
             .order("created_at", desc=True) \
-            .limit(1).single().execute()
-        return float(res.data["updated_due"] or 0)
-    except Exception:
+            .limit(1).execute()
+        if res.data and len(res.data) > 0:
+            return float(res.data[0]["updated_due"] or 0)
+        return 0.0
+    except Exception as e:
+        logger.error(f"get_previous_due error: {e}")
         return 0.0
 
 
-def add_record(client_id: str, customer_name: str, items: list[dict],
+def add_record(client_id: str, customer_name: str, items: list,
                current_total: float, payment: float,
-               record_date: Optional[date] = None,
-               notes: str = "") -> dict:
-    """Insert a new ledger record and update customer total."""
+               record_date=None, notes: str = "") -> dict:
     db = get_db()
     name = customer_name.strip().title()
-
-    # Ensure customer exists
     customer = get_or_create_customer(client_id, name)
-
     previous_due = get_previous_due(client_id, name)
     updated_due = max(0.0, previous_due + current_total - payment)
 
@@ -147,7 +147,6 @@ def add_record(client_id: str, customer_name: str, items: list[dict],
     res = db.table("records").insert(payload).execute()
     record = res.data[0]
 
-    # Update customer summary
     db.table("customers").update({
         "total_due": updated_due,
         "last_transaction_at": datetime.utcnow().isoformat(),
@@ -157,7 +156,6 @@ def add_record(client_id: str, customer_name: str, items: list[dict],
 
 
 def get_history(client_id: str, customer_name: str, limit: int = 10) -> list[dict]:
-    """Last N records for a customer."""
     db = get_db()
     name = customer_name.strip().title()
     res = db.table("records").select("*") \
@@ -170,35 +168,33 @@ def get_history(client_id: str, customer_name: str, limit: int = 10) -> list[dic
 
 
 def get_latest_due(client_id: str, customer_name: str) -> Optional[float]:
-    """Return current outstanding due for a customer, or None if not found."""
     db = get_db()
     name = customer_name.strip().title()
     try:
         res = db.table("customers").select("total_due") \
             .eq("client_id", client_id) \
             .ilike("name", name) \
-            .single().execute()
-        return float(res.data["total_due"] or 0)
-    except Exception:
+            .limit(1).execute()
+        if res.data and len(res.data) > 0:
+            return float(res.data[0]["total_due"] or 0)
+        return None
+    except Exception as e:
+        logger.error(f"get_latest_due error: {e}")
         return None
 
 
 def update_record(record_id: str, client_id: str,
-                  items: Optional[list] = None,
-                  current_total: Optional[float] = None,
-                  payment: Optional[float] = None,
-                  notes: Optional[str] = None) -> dict:
-    """Update an existing record, then cascade-recalculate from that date."""
+                  items=None, current_total=None,
+                  payment=None, notes=None) -> dict:
     db = get_db()
-
-    # Fetch existing record
-    existing = db.table("records").select("*") \
+    res = db.table("records").select("*") \
         .eq("id", record_id).eq("client_id", client_id) \
-        .single().execute().data
+        .limit(1).execute()
 
-    if not existing:
+    if not res.data:
         raise ValueError("Record not found")
 
+    existing = res.data[0]
     patch = {}
     if items is not None:
         patch["items"] = items
@@ -212,39 +208,44 @@ def update_record(record_id: str, client_id: str,
 
     db.table("records").update(patch).eq("id", record_id).execute()
 
-    # Cascade recalculate
-    db.rpc("recalculate_customer_dues", {
-        "p_client_id": client_id,
-        "p_customer_name": existing["customer_name"],
-        "p_from_date": existing["date"],
-    }).execute()
+    try:
+        db.rpc("recalculate_customer_dues", {
+            "p_client_id": client_id,
+            "p_customer_name": existing["customer_name"],
+            "p_from_date": existing["date"],
+        }).execute()
+    except Exception as e:
+        logger.error(f"Recalculate error: {e}")
 
-    return db.table("records").select("*").eq("id", record_id).single().execute().data
+    res2 = db.table("records").select("*").eq("id", record_id).limit(1).execute()
+    return res2.data[0]
 
 
 def delete_record(record_id: str, client_id: str) -> bool:
-    """Delete a record and cascade-recalculate."""
     db = get_db()
-    existing = db.table("records").select("customer_name, date") \
+    res = db.table("records").select("customer_name, date") \
         .eq("id", record_id).eq("client_id", client_id) \
-        .single().execute().data
+        .limit(1).execute()
 
-    if not existing:
+    if not res.data:
         return False
 
+    existing = res.data[0]
     db.table("records").delete().eq("id", record_id).execute()
 
-    db.rpc("recalculate_customer_dues", {
-        "p_client_id": client_id,
-        "p_customer_name": existing["customer_name"],
-        "p_from_date": existing["date"],
-    }).execute()
+    try:
+        db.rpc("recalculate_customer_dues", {
+            "p_client_id": client_id,
+            "p_customer_name": existing["customer_name"],
+            "p_from_date": existing["date"],
+        }).execute()
+    except Exception as e:
+        logger.error(f"Recalculate error: {e}")
 
     return True
 
 
 def delete_last_record(client_id: str, customer_name: str) -> bool:
-    """Undo — delete the most recent record for a customer."""
     db = get_db()
     name = customer_name.strip().title()
     try:
@@ -253,28 +254,27 @@ def delete_last_record(client_id: str, customer_name: str) -> bool:
             .ilike("customer_name", name) \
             .order("date", desc=True) \
             .order("created_at", desc=True) \
-            .limit(1).single().execute()
-        return delete_record(res.data["id"], client_id)
-    except Exception:
+            .limit(1).execute()
+        if res.data:
+            return delete_record(res.data[0]["id"], client_id)
+        return False
+    except Exception as e:
+        logger.error(f"delete_last_record error: {e}")
         return False
 
 
 def get_monthly_summary(client_id: str, year: int, month: int) -> list[dict]:
-    """Aggregate per-customer totals for a given month."""
     db = get_db()
-    start = f"{year}-{month:02d}-01"
-    # Last day of month
     import calendar
     _, last_day = calendar.monthrange(year, month)
+    start = f"{year}-{month:02d}-01"
     end = f"{year}-{month:02d}-{last_day}"
 
     res = db.table("records").select(
         "customer_name, current_total, payment, updated_due"
     ).eq("client_id", client_id) \
-     .gte("date", start).lte("date", end) \
-     .execute()
+     .gte("date", start).lte("date", end).execute()
 
-    # Aggregate in Python
     summary: dict[str, dict] = {}
     for r in (res.data or []):
         cn = r["customer_name"]
@@ -287,11 +287,9 @@ def get_monthly_summary(client_id: str, year: int, month: int) -> list[dict]:
 
 
 def get_overdue_customers(client_id: str, min_due: float = 1.0) -> list[dict]:
-    """All customers with outstanding due >= min_due."""
     db = get_db()
     res = db.table("customers").select("name, phone, total_due, last_transaction_at") \
         .eq("client_id", client_id) \
         .gte("total_due", min_due) \
-        .order("total_due", desc=True) \
-        .execute()
+        .order("total_due", desc=True).execute()
     return res.data or []
