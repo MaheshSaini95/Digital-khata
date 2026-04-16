@@ -219,14 +219,17 @@ def create_bill_image(
         draw.text((W-22-(vb[2]-vb[0]), y), vs, font=fy, fill=color)
         y += 22
 
-    right_row("TOTAL",       current_total, color=DARK_BLUE)
-    right_row("Pichla Bakaya (Prev Due)", previous_due, color=RED)
-    right_row("Payment Received", payment, color=GREEN)
+    right_row("Bill Total", current_total, color=DARK_BLUE)
+    # Show Pichla Bakaya — gray if 0, orange if > 0
+    prev_color = (230, 120, 20) if previous_due > 0 else (150, 150, 150)
+    right_row("Pichla Bakaya (Prev Due)", previous_due, color=prev_color)
+    pay_color = (0, 120, 0) if payment > 0 else (150, 150, 150)
+    right_row("Payment Received (-)", payment, color=pay_color)
 
     _line(draw, y, x1=350, width=2, color=DARK_BLUE)
     y += 6
 
-    # Total Amount box
+    # Total Amount box — updated_due = prev + total - payment
     draw.rectangle([350, y, W-20, y+32], fill=DARK_BLUE)
     draw.text((356, y+6), "TOTAL AMOUNT", font=f_total, fill=WHITE)
     ts = f"Rs. {updated_due:.0f}"
