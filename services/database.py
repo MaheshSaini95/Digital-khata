@@ -127,8 +127,8 @@ def get_previous_due(client_id: str, customer_name: str,
                      before_date: Optional[date] = None) -> float:
     """
     Get the most recent updated_due for a customer.
-    If before_date is given, returns due AS OF that date
-    (for backdated entry support).
+    - No before_date = get absolute latest record (for today entries)
+    - before_date given = get last record strictly BEFORE that date (for backdating)
     """
     db = get_db()
     name = customer_name.strip().title()
@@ -137,15 +137,19 @@ def get_previous_due(client_id: str, customer_name: str,
             .eq("client_id", client_id).ilike("customer_name", name)
 
         if before_date:
-            # Get last record strictly before the given date
+            # Backdated: get last record strictly before the given date
             q = q.lt("date", str(before_date))
+        # else: no filter — get the absolute latest record
 
         res = q.order("date", desc=True) \
                .order("created_at", desc=True) \
                .limit(1).execute()
 
         if res.data:
-            return float(res.data[0]["updated_due"] or 0)
+            val = float(res.data[0]["updated_due"] or 0)
+            logger.debug(f"Previous due for {name}: ₹{val}")
+            return val
+        logger.debug(f"No previous records for {name} — due = 0")
         return 0.0
     except Exception as e:
         logger.error(f"get_previous_due error: {e}")
@@ -166,8 +170,13 @@ def add_record(client_id: str, customer_name: str,
 
     entry_date = record_date or date.today()
 
-    # Get previous due AS OF the entry date (for backdating)
-    previous_due = get_previous_due(client_id, name, before_date=entry_date)
+    # For backdated entries: get due BEFORE that date
+    # For today's entries: get latest due (no date filter)
+    is_backdated = record_date is not None and record_date < date.today()
+    if is_backdated:
+        previous_due = get_previous_due(client_id, name, before_date=entry_date)
+    else:
+        previous_due = get_previous_due(client_id, name)  # latest
     updated_due  = max(0.0, previous_due + current_total - payment)
 
     payload = {
