@@ -417,24 +417,30 @@ def _add_ask_payment(client_id: str, from_number: str, body: str) -> str:
     prev_due = db.get_previous_due(client_id, name)
     updated  = max(0.0, prev_due + total - payment)
 
-    # Check if customer has phone
+    # Check DB for existing phone number
     db_client = db.get_db()
     cust = db_client.table("customers").select("phone") \
         .eq("client_id", client_id).ilike("name", name) \
         .limit(1).execute()
-    has_phone = cust.data and cust.data[0].get("phone")
+    existing_phone = cust.data[0].get("phone", "").strip() if cust.data else ""
 
-    if not has_phone:
+    if existing_phone:
+        # Phone already saved — skip asking, go straight to confirm
+        # Store phone in session for bill sending
+        sess.set_session(from_number, state="add_confirm",
+                         payment=payment, _prev_due=prev_due,
+                         _updated_due=updated,
+                         _customer_phone=existing_phone)
+        logger.info(f"Phone already saved for {name}: {existing_phone} — skipping phone ask")
+        return _build_confirm_text(name, items, total, payment, prev_due, updated)
+    else:
+        # No phone yet — ask once
         sess.set_session(from_number, state="add_ask_phone",
                          payment=payment, _prev_due=prev_due, _updated_due=updated)
         return (
             f"{_build_confirm_text(name, items, total, payment, prev_due, updated)}\n\n"
             f"📱 Enter customer *phone number* to send bill\n_(or type *skip*)_"
         )
-
-    sess.set_session(from_number, state="add_confirm",
-                     payment=payment, _prev_due=prev_due, _updated_due=updated)
-    return _build_confirm_text(name, items, total, payment, prev_due, updated)
 
 
 def _add_ask_phone(client_id: str, from_number: str, body: str) -> str:
